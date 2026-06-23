@@ -154,6 +154,34 @@ def build_node(action: dict) -> dict | None:
     return None
 
 
+def effective_actions(actions: list) -> list:
+    """Filter a raw cache action list down to the effective, replayable actions.
+
+    Drops non-interactive noise (SKIP_ACTIONS), dead-end steps (disconfirmed by the next
+    step's Failure verdict), cache-flagged duplicates, and same-target repeats. Reused by
+    the iterative optimizer to (re)synthesize deterministic nodes from a node's cache.
+    """
+    dead_end_steps = compute_dead_end_steps(actions)
+    effective = []
+    seen = set()
+    for a in actions:
+        atype = a["action_type"]
+        if atype in SKIP_ACTIONS:
+            continue
+        if a.get("step_number") in dead_end_steps:
+            continue
+        if a.get("is_duplicate"):
+            continue
+        attrs = a.get("element_attributes", {})
+        el_key = attrs.get("name", "") or attrs.get("visible_text", "") or str(a.get("index", ""))
+        dedup_key = (atype, el_key, a.get("text", ""))
+        if dedup_key in seen:
+            continue
+        seen.add(dedup_key)
+        effective.append(a)
+    return effective
+
+
 def convert(cache_path: str, output_path: str, source_path: str = None):
     actions = []
     with open(cache_path, "r") as f:
