@@ -1,0 +1,8 @@
+{
+  "jsonl_path": "/Users/vasu/Desktop/Projects/browser-use/cached_memory/cache_arxiv.jsonl",
+  "total_actions": 6,
+  "total_steps": 5,
+  "unique_actions": 6,
+  "redundant_count": 0,
+  "total_duration_seconds": 27.609
+}

@@ -996,6 +996,9 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			await self._get_next_action(browser_state_summary)
 			await self._execute_actions()
 
+			# Record executed actions to the action cache (purely additive logging)
+			await self._record_actions_to_cache(browser_state_summary)
+
 			# Phase 3: Post-processing
 			await self._post_process()
 
@@ -1102,8 +1105,107 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 		if self.state.last_model_output is None:
 			raise ValueError('No model output to execute actions from')
 
+		# Pre-capture element attributes before execution changes the DOM
+		self._pre_captured_elements = {}
+		if self.state.last_model_output and self.state.last_model_output.action:
+			for action in self.state.last_model_output.action:
+				action_dump = action.model_dump(exclude_unset=True)
+				if not action_dump:
+					continue
+				raw_type = next(iter(action_dump.keys()))
+				params = action_dump[raw_type] or {}
+				index = params.get('index')
+				if index is not None and self.browser_session is not None:
+					try:
+						node = await self.browser_session.get_dom_element_by_index(index)
+						if node is not None:
+							self._pre_captured_elements[index] = self._extract_element_attributes(node)
+					except Exception:
+						pass
+
 		result = await self.multi_act(self.state.last_model_output.action)
 		self.state.last_result = result
+
+	def _extract_element_attributes(self, node: Any) -> dict[str, str]:
+		"""Extract a flat, stable set of element attributes for the action cache."""
+		attributes = getattr(node, 'attributes', None) or {}
+		ax_node = getattr(node, 'ax_node', None)
+		role = attributes.get('role', '') or (getattr(ax_node, 'role', None) or '')
+		try:
+			visible_text = node.get_meaningful_text_for_llm()
+		except Exception:
+			visible_text = ''
+		return {
+			'tag': getattr(node, 'tag_name', ''),
+			'id': attributes.get('id', ''),
+			'name': attributes.get('name', ''),
+			'type': attributes.get('type', ''),
+			'aria_label': attributes.get('aria-label', ''),
+			'placeholder': attributes.get('placeholder', ''),
+			'role': role,
+			'visible_text': visible_text,
+		}
+
+	async def _record_actions_to_cache(self, browser_state_summary: BrowserStateSummary | None) -> None:
+		"""Record each executed action from the current step to the action cache.
+
+		Purely additive logging — wrapped so any failure here never affects the run.
+		"""
+		cache = getattr(self, '_action_cache', None)
+		if cache is None or self.state.last_model_output is None:
+			return
+
+		try:
+			url = browser_state_summary.url if browser_state_summary else ''
+
+			# Per-step reasoning fields from the structured model output (same for every
+			# action in this step). eval_previous_goal at step K evaluates step K-1's actions,
+			# so a downstream filter can cross-reference each step against the NEXT step's verdict.
+			current_state = getattr(self.state.last_model_output, 'current_state', None)
+			next_goal = getattr(current_state, 'next_goal', None) if current_state else None
+			memory = getattr(current_state, 'memory', None) if current_state else None
+			eval_previous_goal = getattr(current_state, 'evaluation_previous_goal', None) if current_state else None
+
+			actions = self.state.last_model_output.action or []
+			for action_index, action in enumerate(actions):
+				action_dump = action.model_dump(exclude_unset=True)
+				if not action_dump:
+					continue
+				raw_type = next(iter(action_dump.keys()))
+				params = action_dump[raw_type] or {}
+				index = params.get('index')
+
+				# Normalize the registered action name to the documented cache schema.
+				action_type = {'input': 'input_text'}.get(raw_type, raw_type)
+
+				record: dict[str, Any] = {
+					'step_number': self.state.n_steps,
+					'action_index_in_step': action_index,
+					'action_type': action_type,
+					'index': index,
+					'url': url,
+					'next_goal': next_goal,
+					'memory': memory,
+					'eval_previous_goal': eval_previous_goal,
+				}
+
+				if raw_type == 'done':
+					record['text'] = params.get('text', '')
+				elif raw_type == 'click':
+					record['button'] = params.get('button', 'left')
+				elif 'text' in params:
+					record['text'] = params.get('text', '')
+
+				# Use element attributes pre-captured before execution mutated the DOM.
+				element_attributes = getattr(self, '_pre_captured_elements', {}).get(index, {}) if index is not None else {}
+				record['element_attributes'] = element_attributes
+
+				cache.record_action(record)
+		except Exception as e:
+			print(f'[ACTION_CACHE] Cache recording error at step {self.state.n_steps}: {e}')
+			import traceback
+
+			traceback.print_exc()
 
 	async def _post_process(self) -> None:
 		"""Handle post-action processing like download tracking and result logging"""
@@ -2191,6 +2293,18 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			self._session_start_time = time.time()
 			self._task_start_time = self._session_start_time  # Initialize task start time
 
+			# Initialize the action cache (purely additive logging of executed actions)
+			try:
+				from browser_use.cache import ActionCache
+
+				self._action_cache = ActionCache()
+			except Exception as e:
+				self._action_cache = None
+				print(f'[ACTION_CACHE] Failed to initialize action cache: {e}')
+				import traceback
+
+				traceback.print_exc()
+
 			# Only dispatch session events if this is the first run
 			if not self.state.session_initialized:
 				self.logger.debug('📡 Dispatching CreateAgentSessionEvent...')
@@ -2306,6 +2420,17 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 			raise e
 
 		finally:
+			# Finalize the action cache (purely additive logging)
+			action_cache = getattr(self, '_action_cache', None)
+			if action_cache is not None:
+				try:
+					action_cache.finalize()
+				except Exception as e:
+					print(f'[ACTION_CACHE] Failed to finalize action cache: {e}')
+					import traceback
+
+					traceback.print_exc()
+
 			if should_delay_close and self._demo_mode_enabled and agent_run_error is None:
 				await asyncio.sleep(30)
 			if agent_run_error:
