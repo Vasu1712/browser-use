@@ -1157,6 +1157,15 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 
 		try:
 			url = browser_state_summary.url if browser_state_summary else ''
+
+			# Per-step reasoning fields from the structured model output (same for every
+			# action in this step). eval_previous_goal at step K evaluates step K-1's actions,
+			# so a downstream filter can cross-reference each step against the NEXT step's verdict.
+			current_state = getattr(self.state.last_model_output, 'current_state', None)
+			next_goal = getattr(current_state, 'next_goal', None) if current_state else None
+			memory = getattr(current_state, 'memory', None) if current_state else None
+			eval_previous_goal = getattr(current_state, 'evaluation_previous_goal', None) if current_state else None
+
 			actions = self.state.last_model_output.action or []
 			for action_index, action in enumerate(actions):
 				action_dump = action.model_dump(exclude_unset=True)
@@ -1175,6 +1184,9 @@ class Agent(Generic[Context, AgentStructuredOutput]):
 					'action_type': action_type,
 					'index': index,
 					'url': url,
+					'next_goal': next_goal,
+					'memory': memory,
+					'eval_previous_goal': eval_previous_goal,
 				}
 
 				if raw_type == 'done':

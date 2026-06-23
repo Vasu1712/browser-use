@@ -1,0 +1,9 @@
+{
+  "jsonl_path": "/Users/vasu/Desktop/Projects/browser-use/cached_memory/cache_2026-06-22T20-22-52.jsonl",
+  "total_actions": 13,
+  "total_steps": 12,
+  "unique_actions": 11,
+  "redundant_count": 2,
+  "failure_verdict_steps": 3,
+  "total_duration_seconds": 133.078
+}

@@ -16,6 +16,22 @@ from typing import Any
 logger = logging.getLogger('browser_use.cache')
 
 
+def _classify_verdict(eval_text: str | None) -> str:
+	"""Classify an eval_previous_goal string as 'success' / 'failure' / 'unknown'.
+
+	Mirrors the agent's own log_response logic (success checked before failure) so the
+	cache's notion of a verdict matches what the agent prints to the console.
+	"""
+	if not eval_text:
+		return 'unknown'
+	low = eval_text.lower()
+	if 'success' in low:
+		return 'success'
+	if 'failure' in low:
+		return 'failure'
+	return 'unknown'
+
+
 class ActionCache:
 	"""Append-only JSONL recorder for executed agent actions.
 
@@ -23,7 +39,7 @@ class ActionCache:
 	JSON line, flushed immediately so partial runs still leave usable data behind.
 	"""
 
-	def __init__(self, cache_dir: str = '/Users/vasu/Desktop/Projects/browser-use/dump') -> None:
+	def __init__(self, cache_dir: str = '/Users/vasu/Desktop/Projects/browser-use/cached_memory') -> None:
 		self.cache_dir = cache_dir
 		os.makedirs(self.cache_dir, exist_ok=True)
 
@@ -85,12 +101,20 @@ class ActionCache:
 		unique_actions = len(self._records) - redundant_count
 		total_duration = (datetime.now() - self._start_time).total_seconds()
 
+		# Count distinct steps whose own eval_previous_goal carried a Failure verdict
+		# (the agent judged the prior step's actions a dead end). One verdict per step.
+		step_verdicts: dict[Any, str] = {}
+		for r in self._records:
+			step_verdicts.setdefault(r.get('step_number'), _classify_verdict(r.get('eval_previous_goal')))
+		failure_verdict_steps = sum(1 for v in step_verdicts.values() if v == 'failure')
+
 		summary = {
 			'jsonl_path': self.jsonl_path,
 			'total_actions': len(self._records),
 			'total_steps': total_steps,
 			'unique_actions': unique_actions,
 			'redundant_count': redundant_count,
+			'failure_verdict_steps': failure_verdict_steps,
 			'total_duration_seconds': round(total_duration, 3),
 		}
 

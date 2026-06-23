@@ -2,29 +2,55 @@
 """
 Converts a browser-use action cache (JSONL) into a deterministic
 optexity automation JSON — no LLM needed on replay.
-
-Usage:
-    python cache_to_automation.py <cache.jsonl> [output.json] [--source original_automation.json]
-
-The --source flag copies the parameters section (input_parameters, generated_parameters)
-from the original automation so the cached version stays compatible with the same curl request.
-
-Locator priority (mirrors optexity's own scoring):
-    1. id (stable only)  → locator("#myid").first
-    2. name              → locator("tag[name='val']").first
-    3. aria_label        → get_by_label("val").first
-    4. placeholder       → get_by_placeholder("val").first
-    5. role+text         → get_by_role("role", name="text").first
-    6. tag+type          → locator("tag[type='val']").first  (last resort)
+Locator priority (mirrors optexity's own scoring)
 """
 
 import json
 import re
 import sys
-from pathlib import Path
 
 # Action types that are non-interactive noise — always filter out
 SKIP_ACTIONS = {"done", "scroll", "wait", "go_back", "extract_data"}
+
+
+def classify_verdict(eval_text: str) -> str:
+    """Classify an eval_previous_goal string as 'success' / 'failure' / 'unknown'.
+
+    Mirrors the agent's own logic (success checked before failure).
+    """
+    if not eval_text:
+        return "unknown"
+    low = eval_text.lower()
+    if "success" in low:
+        return "success"
+    if "failure" in low:
+        return "failure"
+    return "unknown"
+
+
+def compute_dead_end_steps(actions: list) -> set:
+    """Identify steps whose actions led to a dead end.
+
+    eval_previous_goal at step K evaluates the previous ACTED step's actions. So if the
+    next acted step's verdict is 'failure', the current step's actions were a dead end
+    (e.g. clicked a premium image, hit a paywall, had to recover). Those should be dropped.
+
+    Backward compatible: if no records carry eval_previous_goal (older caches), no step
+    has a known verdict, so nothing is flagged and filtering behaves exactly as before.
+    """
+    step_verdict = {}
+    for a in actions:
+        s = a.get("step_number")
+        if s is not None and s not in step_verdict:
+            step_verdict[s] = classify_verdict(a.get("eval_previous_goal", ""))
+
+    sorted_steps = sorted(step_verdict)
+    dead_end = set()
+    for i, s in enumerate(sorted_steps[:-1]):
+        next_s = sorted_steps[i + 1]
+        if step_verdict.get(next_s) == "failure":
+            dead_end.add(s)
+    return dead_end
 
 
 def is_stable_id(el_id: str) -> bool:
@@ -145,6 +171,9 @@ def convert(cache_path: str, output_path: str, source_path: str = None):
         print(f"Source: {source_path}")
         print(f"  Carried over parameters: {json.dumps(parameters)}")
 
+    # --- Identify dead-end steps (actions disconfirmed by the next step's Failure verdict) ---
+    dead_end_steps = compute_dead_end_steps(actions)
+
     # --- Filter ---
     effective = []
     seen = set()
@@ -154,6 +183,10 @@ def convert(cache_path: str, output_path: str, source_path: str = None):
 
         if atype in SKIP_ACTIONS:
             skipped_types.append(atype)
+            continue
+
+        if a.get("step_number") in dead_end_steps:
+            skipped_types.append(f"{atype}(deadend)")
             continue
 
         if a.get("is_duplicate"):
